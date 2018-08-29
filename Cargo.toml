@@ -3,4 +3,8 @@ name = "hermes"
 version = "0.1.0"
 authors = ["Hao Shi <shisoftgenius@gmail.com>"]
 
+[lib]
+name = "hermes"
+
 [dependencies]
+parking_lot = {version = "0.6", features = ["nightly"]}
