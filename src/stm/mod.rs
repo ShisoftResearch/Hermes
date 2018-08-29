@@ -15,7 +15,6 @@ struct TxnVal {
     id: usize,
     read: usize, // last read id
     write: usize, // last write id
-    owner: usize, // the lock, 0 for released
     data: UnsafeValCell
 }
 
@@ -27,7 +26,7 @@ impl TxnVal {
     fn new<T>(id: usize, val: T) -> TxnVal where T: Any + Send + Sync {
         TxnVal {
             id, data: unsafe_val_from(val),
-            read: 0, write: 0, owner: 0
+            read: 0, write: 0
         }
     }
 
@@ -90,10 +89,10 @@ impl TxnManager {
 }
 
 impl TxnManagerInner {
-    fn get_state(&self, id: usize) -> Option<Arc<Mutex<TxnVal>>> {
+    fn get_state(&self, id: &usize) -> Option<Arc<Mutex<TxnVal>>> {
         let states = self.states.read();
         return states
-            .get(&id)
+            .get(id)
             .map(|state| state.clone());
     }
     fn next_val_id(&self) -> usize {
@@ -111,6 +110,7 @@ pub struct Txn {
     manager: Arc<TxnManagerInner>,
     values: BTreeMap<usize, DataObject>,
     state: TxnState,
+    history: Vec<(usize, Option<UnsafeValCell>)>,
     id: usize
 }
 
@@ -120,6 +120,7 @@ impl Txn {
             manager: manager.clone(),
             values: BTreeMap::new(),
             state: TxnState::Started,
+            history: Vec::new(),
             id
         }
     }
@@ -146,7 +147,7 @@ impl Txn {
                 v.data.as_ref().map(|v| (&* v.get()).clone().downcast::<T>().expect(""))
             })
         }
-        if let Some(state_lock) = self.manager.get_state(val_id) {
+        if let Some(state_lock) = self.manager.get_state(&val_id) {
             let mut state = state_lock.lock();
             {
                 let val_last_write = &mut state.read;
@@ -190,7 +191,7 @@ impl Txn {
         self.values.insert(val_id, DataObject {
             data: Some(unsafe_val_from(value)),
             changed: true,
-            new: !self.manager.states.read().contains_key(&val_id)
+            new: true
         });
     }
 
@@ -211,6 +212,8 @@ impl Txn {
             if v.data.is_some() {
                 // set writing value
                 v.data = None;
+                v.changed = true;
+                v.new = false;
                 return Some(());
             } else {
                 // already deleted
@@ -232,11 +235,65 @@ impl Txn {
     // and then perform write operations
     pub fn prepare(&mut self) -> Result<(), TxnErr> {
         assert_eq!(self.state, TxnState::Started);
-        // obtain all value locks
-        for (id, val) in &self.values {
-
+        // obtain all existing value locks
+        let mut value_locks = vec![];
+        let mut value_guards = BTreeMap::new();
+        let mut history = &mut self.history;
+        let txn_id = self.id;
+        for (id, obj) in &self.values {
+            if !obj.changed { continue; } // skip readonly lock
+            if let Some(ref val) = self.manager.get_state(id) {
+                value_locks.push(val.clone());
+            }
         }
-        unimplemented!();
+        for lock in &value_locks {
+            let guard = lock.lock();
+            if guard.read > txn_id || guard.write > txn_id {
+                return Err(TxnErr::NotRealizable)
+            }
+            value_guards.insert(guard.id, guard);
+        }
+        for (id, obj) in &mut self.values {
+            if !obj.changed { continue; } // ignore read
+            let mut states = self.manager.states.write();
+            if obj.new {
+                // create
+                if states.contains_key(id) { return Err(TxnErr::NotRealizable) }
+                if let Some(ref mut new_data) = &mut obj.data {
+                    let new_val_owned = mem::replace(new_data, unsafe_val_from(()));
+                    states.insert(
+                        *id,
+                        Arc::new(
+                            Mutex::new(
+                                TxnVal {
+                                    id: *id, data: new_val_owned,
+                                    read: txn_id, write: txn_id
+                                })));
+                    history.push((*id, None));
+                    continue
+                } else { unreachable!() }
+            }
+            // following part assumes value exists in txn manager but need to be changed
+            if value_guards.contains_key(id) {
+                if let (Some(ref mut new_obj), Some(val)) = (&mut obj.data, value_guards.get(id)) {
+                    // update
+                    let new_val_owned = mem::replace(new_obj, unsafe_val_from(()));
+                    let old_val_owned = mem::replace(&mut val.data, new_val_owned);
+                    history.push((*id, Some(old_val_owned)));
+                    continue;
+                }
+                // Delete
+                if let Some(val_lock) = states.remove(id) {
+                    let mut txn_val =  val_lock.lock();
+                    let removed_val_owned = mem::replace(&mut txn_val.data, unsafe_val_from(()));
+                    history.push((*id, Some(removed_val_owned)));
+                    continue;
+                }
+            }
+            // success operations should have been continued already
+            return Err(TxnErr::NotRealizable);
+        }
+        return Ok(())
     }
 
     pub fn abort(&mut self) -> Result<(), TxnErr> {
