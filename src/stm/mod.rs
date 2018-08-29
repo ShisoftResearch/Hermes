@@ -275,7 +275,7 @@ impl Txn {
             }
             // following part assumes value exists in txn manager but need to be changed
             if value_guards.contains_key(id) {
-                if let (Some(ref mut new_obj), Some(val)) = (&mut obj.data, value_guards.get(id)) {
+                if let (Some(ref mut new_obj), Some(ref mut val)) = (&mut obj.data, value_guards.get_mut(id)) {
                     // update
                     let new_val_owned = mem::replace(new_obj, unsafe_val_from(()));
                     let old_val_owned = mem::replace(&mut val.data, new_val_owned);
