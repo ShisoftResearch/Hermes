@@ -85,16 +85,19 @@ impl TxnManager {
                 Ok(res) => {
                     match txn.prepare() {
                         Ok(_) => {
+                            trace!("Prepared {}", txn_id);
                             if auto_commit {
                                 txn.end();
                             }
                             return Ok((txn, res));
                         },
                         Err(TxnErr::Aborted) => {
+                            trace!("Prepare aborted {}", txn_id);
                             txn.abort();
                             return Err(TxnErr::Aborted)
                         },
                         Err(TxnErr::NotRealizable) => {
+                            trace!("Prepare not realizable {}", txn_id);
                             txn.abort();
                             continue;
                         }
@@ -107,6 +110,11 @@ impl TxnManager {
                 }
             }
         }
+    }
+    pub fn transaction<R, B>(&self, block: B)
+        -> Result<R, TxnErr> where B: Fn(&mut Txn) -> Result<R, TxnErr>
+    {
+        self.transaction_optional_commit(block, true).map(|(_, r)| r)
     }
 }
 
@@ -189,6 +197,7 @@ impl Txn {
                 let val_last_write = &mut state.read;
                 if *val_last_write > self.id || state_owner != 0 {
                     // cannot read when the transactions happens after last write
+                    trace!("Not realizable on read {} due to read too late {}/{}", val_id, val_last_write, self.id);
                     return Err(TxnErr::NotRealizable)
                 }
             }
@@ -221,7 +230,7 @@ impl Txn {
     }
 
     // Write to transaction cache for commit
-    pub fn write<T>(&mut self, val_ref: TxnValRef, value: T) where T: 'static + Send + Sync + Clone {
+    pub fn update<T>(&mut self, val_ref: TxnValRef, value: T) where T: 'static + Send + Sync + Clone {
         assert_eq!(self.state, TxnState::Started);
         let val_id = val_ref.id;
         if let Some(ref mut data_obj) = self.values.get_mut(&val_id) {
@@ -238,7 +247,7 @@ impl Txn {
         self.values.insert(val_id, DataObject {
             data: Some(unsafe_val_from(value)),
             changed: true,
-            new: true
+            new: false
         });
     }
 
@@ -283,31 +292,43 @@ impl Txn {
     // prepare checks if realizable and obtain locks on values to ensure no read and write on them,
     // and then perform write operations
     pub fn prepare(&mut self) -> Result<(), TxnErr> {
+        trace!("Preparing {}", self.id);
         assert_eq!(self.state, TxnState::Started);
         // obtain all existing value locks
         let mut value_locks = vec![];
         let mut value_guards = BTreeMap::new();
         let mut history = &mut self.history;
         let txn_id = self.id;
+        trace!("obtaining locks");
         for (id, obj) in &self.values {
             if !obj.changed { continue; } // skip readonly lock
             if let Some(ref val) = self.manager.get_state(id) {
                 value_locks.push(val.clone());
             }
         }
+        trace!("obtaining guards");
         for lock in &value_locks {
             let guard = lock.lock();
             if guard.read > txn_id || guard.write > txn_id || guard.owner != 0 {
+                trace!("Not realizable on prepare due to r/w txn id and owner check: {}/{}, owner {}",
+                       guard.read, guard.write, guard.owner);
                 return Err(TxnErr::NotRealizable)
             }
             value_guards.insert(guard.id, guard);
         }
+        trace!("checking and updating data");
         for (id, obj) in &mut self.values {
-            if !obj.changed { continue; } // ignore read
+            if !obj.changed {
+                trace!("ignore read data {}", id);
+                continue;
+            } // ignore read
             let mut states = self.manager.states.write();
             if obj.new {
-                // create
-                if states.contains_key(id) { return Err(TxnErr::NotRealizable) }
+                trace!("Creating data {}", id);
+                if states.contains_key(id) {
+                    trace!("Not realizable due to creating existed value for id: {}", id);
+                    return Err(TxnErr::NotRealizable)
+                }
                 if let Some(ref mut new_data) = &mut obj.data {
                     let new_val_owned = mem::replace(new_data, unsafe_val_from(()));
                     states.insert(
@@ -334,7 +355,7 @@ impl Txn {
             // following part assumes value exists in txn manager but need to be changed
             if value_guards.contains_key(id) {
                 if let (Some(ref mut new_obj), Some(ref mut val)) = (&mut obj.data, value_guards.get_mut(id)) {
-                    // update
+                    trace!("Updating data {}", id);
                     let new_val_owned = mem::replace(new_obj, unsafe_val_from(()));
                     let old_val_owned = mem::replace(&mut val.data, new_val_owned);
                     val.version += 1;
@@ -348,8 +369,9 @@ impl Txn {
                     continue;
                 }
                 // Delete
-                if let Some(val_lock) = states.remove(id) {
-                    let mut txn_val = val_lock.lock();
+                if let Some(_) = states.remove(id) {
+                    trace!("Deleting data {}", id);
+                    let mut txn_val = value_guards.get_mut(id).unwrap();
                     let removed_val_owned = mem::replace(&mut txn_val.data, unsafe_val_from(()));
                     history.push(HistoryEntry {
                         id: *id,
@@ -444,6 +466,7 @@ impl Txn {
     }
 }
 
+#[derive(Debug)]
 pub enum TxnErr {
     Aborted,
     NotRealizable
@@ -456,4 +479,47 @@ enum TxnState {
     Prepared,
     Committed,
     Ended
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use simple_logger;
+
+    #[test]
+    fn single_op() {
+        simple_logger::init().unwrap();
+        let manager = TxnManager::new();
+        let val = manager.transaction(|txn| {
+            // C
+            Ok(txn.new_value::<u32>(123))
+        }).unwrap();
+        manager.transaction(|txn| {
+            // R
+            assert_eq!(txn.read_owned::<u32>(val)?.unwrap(), 123);
+            Ok(())
+        });
+        manager.transaction(|txn| {
+            assert_eq!(txn.read_owned::<u32>(val)?.unwrap(), 123);
+            Ok(())
+        });
+        manager.transaction(|txn| {
+            // U
+            txn.update::<u32>(val, 456);
+            Ok(())
+        });
+        manager.transaction(|txn| {
+            assert_eq!(txn.read_owned::<u32>(val)?.unwrap(), 456);
+            Ok(())
+        });
+        manager.transaction(|txn| {
+            // D
+            txn.delete(val);
+            Ok(())
+        });
+        manager.transaction(|txn| {
+            assert!(txn.read::<u32>(val)?.is_none());
+            Ok(())
+        });
+    }
 }
