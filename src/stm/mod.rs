@@ -276,6 +276,7 @@ impl Txn {
                 return None;
             }
         }
+        trace!("read locking manager state on delete");
         if self.manager.states.read().get(&val_id).is_some() {
             // found the value but does not in the
             self.values.insert(val_id, DataObject {
@@ -322,9 +323,10 @@ impl Txn {
                 trace!("ignore read data {}", id);
                 continue;
             } // ignore read
-            let mut states = self.manager.states.write();
             if obj.new {
                 trace!("Creating data {}", id);
+                trace!("locking manager state prepare create data {} txn: {}", id, txn_id);
+                let mut states = self.manager.states.write();
                 if states.contains_key(id) {
                     trace!("Not realizable due to creating existed value for id: {}", id);
                     return Err(TxnErr::NotRealizable)
@@ -369,17 +371,21 @@ impl Txn {
                     continue;
                 }
                 // Delete
-                if let Some(_) = states.remove(id) {
-                    trace!("Deleting data {}", id);
-                    let mut txn_val = value_guards.get_mut(id).unwrap();
-                    let removed_val_owned = mem::replace(&mut txn_val.data, unsafe_val_from(()));
-                    history.push(HistoryEntry {
-                        id: *id,
-                        data: Some(removed_val_owned),
-                        version: txn_val.version,
-                        op: HistoryOp::Delete
-                    });
-                    continue;
+                {
+                    trace!("locking manager state prepare delete data {} txn: {}", id, txn_id);
+                    let mut states = self.manager.states.write();
+                    if let Some(_) = states.remove(id) {
+                        trace!("Deleting data {}", id);
+                        let mut txn_val = value_guards.get_mut(id).unwrap();
+                        let removed_val_owned = mem::replace(&mut txn_val.data, unsafe_val_from(()));
+                        history.push(HistoryEntry {
+                            id: *id,
+                            data: Some(removed_val_owned),
+                            version: txn_val.version,
+                            op: HistoryOp::Delete
+                        });
+                        continue;
+                    }
                 }
             }
             // success operations should have been continued already
@@ -394,8 +400,9 @@ impl Txn {
             return Ok(())
         }
         {
-            let mut states = self.manager.states.write();
             let txn_id = self.id;
+            trace!("locking manager state on abort {}", txn_id);
+            let mut states = self.manager.states.write();
             for history in &mut self.history {
                 let id = history.id;
                 match history.op {
@@ -448,6 +455,7 @@ impl Txn {
     fn end(&mut self) {
         let txn_id = self.id;
         if self.state == TxnState::Aborted || self.state == TxnState::Prepared {
+            trace!("locking manager state on end: {}", txn_id);
             let states = self.manager.states.read();
             for (id, obj) in &self.values {
                 if let Some(lock) = states.get(id) {
