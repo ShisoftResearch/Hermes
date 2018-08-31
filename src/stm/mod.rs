@@ -546,21 +546,26 @@ mod test {
     fn parallel_counter() {
         simple_logger::init();
         let manager = Arc::new(TxnManager::new());
-        let threads = 50;
+        let thread_count = 50;
         let v1 = manager.with_value(0);
-        (0..threads).map(|i| {
+        let mut threads = vec![];
+        for _ in 0..thread_count {
             let manager = manager.clone();
-            thread::spawn(move || {
+            let th = thread::spawn(move || {
                 manager.transaction(|txn| {
                     let mut v = txn.read_owned::<i32>(v1)?.unwrap();
                     v += 1;
                     txn.update(v1, v);
                     Ok(())
                 });
-            })
-        }).for_each(|th| { th.join(); });
+            });
+            threads.push(th);
+        }
+        for th in threads {
+            th.join().unwrap();
+        }
         assert_eq!(manager.transaction(|txn| {
             txn.read_owned::<i32>(v1).map(|opt| opt.unwrap())
-        }).unwrap(), threads);
+        }).unwrap(), thread_count);
     }
 }
