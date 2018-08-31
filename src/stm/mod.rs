@@ -299,14 +299,14 @@ impl Txn {
         let mut value_guards = BTreeMap::new();
         let mut history = &mut self.history;
         let txn_id = self.id;
-        trace!("obtaining locks");
+        trace!("obtaining locks {}", self.id);
         for (id, obj) in &self.values {
             if !obj.changed { continue; } // skip readonly lock
             if let Some(ref val) = self.manager.get_state(id) {
                 value_locks.push(val.clone());
             }
         }
-        trace!("obtaining guards");
+        trace!("obtaining guards {}", self.id);
         for lock in &value_locks {
             let guard = lock.lock();
             if guard.read > txn_id || guard.write > txn_id || guard.owner != 0 {
@@ -316,7 +316,7 @@ impl Txn {
             }
             value_guards.insert(guard.id, guard);
         }
-        trace!("checking and updating data");
+        trace!("checking and updating data {}", self.id);
         for (id, obj) in &mut self.values {
             if !obj.changed {
                 trace!("ignore read data {}", id);
@@ -485,10 +485,11 @@ enum TxnState {
 mod test {
     use super::*;
     use simple_logger;
+    use std::thread;
 
     #[test]
     fn single_op() {
-        simple_logger::init().unwrap();
+        simple_logger::init();
         let manager = TxnManager::new();
         let val = manager.transaction(|txn| {
             // C
@@ -521,5 +522,45 @@ mod test {
             assert!(txn.read::<u32>(val)?.is_none());
             Ok(())
         });
+    }
+
+    #[test]
+    fn write_reads() {
+        simple_logger::init();
+        let manager = TxnManager::new();
+        let v1 = manager.with_value::<u64>(123);
+        let v2 = manager.transaction(|txn| {
+            assert_eq!(txn.read_owned::<u64>(v1)?.unwrap(), 123);
+            txn.update::<u64>(v1, 321);
+            assert_eq!(txn.read_owned::<u64>(v1)?.unwrap(), 321);
+            let v1_val = txn.read_owned::<u64>(v1)?.unwrap();
+            Ok(txn.new_value(v1_val))
+        }).unwrap();
+        manager.transaction(|txn| {
+            assert_eq!(txn.read_owned::<u64>(v2)?.unwrap(), 321);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn parallel_counter() {
+        simple_logger::init();
+        let manager = Arc::new(TxnManager::new());
+        let threads = 50;
+        let v1 = manager.with_value(0);
+        (0..threads).map(|i| {
+            let manager = manager.clone();
+            thread::spawn(move || {
+                manager.transaction(|txn| {
+                    let mut v = txn.read_owned::<i32>(v1)?.unwrap();
+                    v += 1;
+                    txn.update(v1, v);
+                    Ok(())
+                });
+            })
+        }).for_each(|th| { th.join(); });
+        assert_eq!(manager.transaction(|txn| {
+            txn.read_owned::<i32>(v1).map(|opt| opt.unwrap())
+        }).unwrap(), threads);
     }
 }
