@@ -43,6 +43,12 @@ impl TxnVal {
     }
 }
 
+impl Default for TxnValRef {
+    fn default() -> Self {
+        TxnValRef { id:0 }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct TxnValRef {
     id: usize
