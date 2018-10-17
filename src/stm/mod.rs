@@ -49,7 +49,7 @@ impl Default for TxnValRef {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TxnValRef {
     id: usize
 }
