@@ -1,7 +1,7 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 use parking_lot::Mutex;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::any::Any;
 use std::borrow::BorrowMut;
@@ -57,7 +57,7 @@ pub struct TxnValRef {
 struct TxnManagerInner {
     val_counter: AtomicUsize,
     txn_counter: AtomicUsize,
-    states: RwLock<BTreeMap<usize, Arc<Mutex<TxnVal>>>>
+    states: RwLock<HashMap<usize, Arc<Mutex<TxnVal>>>>
 }
 
 pub struct TxnManager {
@@ -70,7 +70,7 @@ impl TxnManager {
             inner: Arc::new(TxnManagerInner {
                 val_counter: AtomicUsize::new(1),
                 txn_counter: AtomicUsize::new(1),
-                states: RwLock::new(BTreeMap::new())
+                states: RwLock::new(HashMap::new())
             })
         }
     }
@@ -155,7 +155,7 @@ enum HistoryOp {
 
 pub struct Txn {
     manager: Arc<TxnManagerInner>,
-    values: BTreeMap<usize, DataObject>,
+    values: HashMap<usize, DataObject>,
     state: TxnState,
     history: Vec<HistoryEntry>,
     id: usize
@@ -165,7 +165,7 @@ impl Txn {
     fn new(manager: &Arc<TxnManagerInner>, id: usize) -> Txn {
         Txn {
             manager: manager.clone(),
-            values: BTreeMap::new(),
+            values: HashMap::new(),
             state: TxnState::Started,
             history: Vec::new(),
             id
@@ -303,7 +303,7 @@ impl Txn {
         assert_eq!(self.state, TxnState::Started);
         // obtain all existing value locks
         let mut value_locks = vec![];
-        let mut value_guards = BTreeMap::new();
+        let mut value_guards = HashMap::new();
         let mut history = &mut self.history;
         let txn_id = self.id;
         trace!("obtaining locks {}", self.id);
