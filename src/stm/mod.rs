@@ -1,61 +1,76 @@
-use std::cell::UnsafeCell;
-use std::sync::atomic::AtomicUsize;
 use parking_lot::Mutex;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::any::Any;
-use std::sync::atomic::Ordering;
-use std::mem;
 use parking_lot::RwLock;
+use std::any::Any;
+use std::cell::UnsafeCell;
+use std::collections::HashMap;
+use std::mem;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 type UnsafeValCell = UnsafeCell<Arc<Any + Send + Sync>>;
 
 struct TxnVal {
     id: usize,
-    read: usize, // last read id
+    read: usize,  // last read id
     write: usize, // last write id
     version: usize,
     owner: usize,
     data: UnsafeValCell,
 }
 
-fn unsafe_val_from<T>(val: T) -> UnsafeValCell where T: Any + Send + Sync + Clone {
+fn unsafe_val_from<T>(val: T) -> UnsafeValCell
+where
+    T: Any + Send + Sync + Clone,
+{
     UnsafeCell::new(Arc::new(val))
 }
 
 impl TxnVal {
-    fn new<T>(id: usize, val: T) -> TxnVal where T: Any + Send + Sync + Clone {
+    fn new<T>(id: usize, val: T) -> TxnVal
+    where
+        T: Any + Send + Sync + Clone,
+    {
         TxnVal {
-            id, data: unsafe_val_from(val),
-            read: 0, write: 0, version: 1, owner: 0
+            id,
+            data: unsafe_val_from(val),
+            read: 0,
+            write: 0,
+            version: 1,
+            owner: 0,
         }
     }
 
-    unsafe fn get<T>(&self) -> Arc<T> where T: Any + Send + Sync + Clone {
+    unsafe fn get<T>(&self) -> Arc<T>
+    where
+        T: Any + Send + Sync + Clone,
+    {
         let data = &*self.data.get();
-        data.clone().downcast::<T>().expect("wrong type for txn val")
+        data.clone()
+            .downcast::<T>()
+            .expect("wrong type for txn val")
     }
 }
 
 impl Default for TxnValRef {
     fn default() -> Self {
-        TxnValRef { id:0 }
+        TxnValRef { id: 0 }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TxnValRef {
-    id: usize
+    id: usize,
 }
 
 struct TxnManagerInner {
     val_counter: AtomicUsize,
     txn_counter: AtomicUsize,
-    states: RwLock<HashMap<usize, Arc<Mutex<TxnVal>>>>
+    states: RwLock<HashMap<usize, Arc<Mutex<TxnVal>>>>,
 }
 
 pub struct TxnManager {
-    inner: Arc<TxnManagerInner>
+    inner: Arc<TxnManagerInner>,
 }
 
 impl TxnManager {
@@ -64,42 +79,48 @@ impl TxnManager {
             inner: Arc::new(TxnManagerInner {
                 val_counter: AtomicUsize::new(1),
                 txn_counter: AtomicUsize::new(1),
-                states: RwLock::new(HashMap::new())
-            })
+                states: RwLock::new(HashMap::new()),
+            }),
         }
     }
-    pub fn with_value<T>(&self, val: T) -> TxnValRef where T: Any + Send + Sync + Clone {
+    pub fn with_value<T>(&self, val: T) -> TxnValRef
+    where
+        T: Any + Send + Sync + Clone,
+    {
         let val_id = self.inner.next_val_id();
         let val = TxnVal::new(val_id, val);
         let mut states = self.inner.states.write();
         states.insert(val_id, Arc::new(Mutex::new(val)));
         TxnValRef { id: val_id }
     }
-    fn transaction_optional_commit<R, B>(&self, block: B, auto_commit: bool)
-        -> Result<(Txn, R), TxnErr> where B: Fn(&mut Txn) -> Result<R, TxnErr>
+    fn transaction_optional_commit<R, B>(
+        &self,
+        block: B,
+        auto_commit: bool,
+    ) -> Result<(Txn, R), TxnErr>
+    where
+        B: Fn(&mut Txn) -> Result<R, TxnErr>,
     {
         loop {
             let txn_id = self.inner.txn_counter.fetch_add(1, Ordering::Relaxed);
             let mut txn = Txn::new(&self.inner, txn_id);
             match block(&mut txn) {
-                Ok(res) => {
-                    match txn.prepare() {
-                        Ok(_) => {
-                            trace!("Prepared {}", txn_id);
-                            if auto_commit {
-                                txn.commit();
-                            }
-                            return Ok((txn, res));
-                        },
-                        Err(TxnErr::Aborted) => {
-                            trace!("Prepare aborted {}", txn_id);
-                            return Err(txn.abort().err().unwrap());
-                        },
-                        Err(TxnErr::NotRealizable) => {
-                            trace!("Prepare not realizable {}", txn_id);
-                            txn.abort().err().unwrap();
-                            continue;
+                Ok(res) => match txn.prepare() {
+                    Ok(_) => {
+                        trace!("Prepared {}", txn_id);
+                        if auto_commit {
+                            txn.commit();
                         }
+                        return Ok((txn, res));
+                    }
+                    Err(TxnErr::Aborted) => {
+                        trace!("Prepare aborted {}", txn_id);
+                        return Err(txn.abort().err().unwrap());
+                    }
+                    Err(TxnErr::NotRealizable) => {
+                        trace!("Prepare not realizable {}", txn_id);
+                        txn.abort().err().unwrap();
+                        continue;
                     }
                 },
                 Err(TxnErr::Aborted) => return Err(TxnErr::Aborted),
@@ -110,19 +131,19 @@ impl TxnManager {
             }
         }
     }
-    pub fn transaction<R, B>(&self, block: B)
-        -> Result<R, TxnErr> where B: Fn(&mut Txn) -> Result<R, TxnErr>
+    pub fn transaction<R, B>(&self, block: B) -> Result<R, TxnErr>
+    where
+        B: Fn(&mut Txn) -> Result<R, TxnErr>,
     {
-        self.transaction_optional_commit(block, true).map(|(_, r)| r)
+        self.transaction_optional_commit(block, true)
+            .map(|(_, r)| r)
     }
 }
 
 impl TxnManagerInner {
     fn get_state(&self, id: &usize) -> Option<Arc<Mutex<TxnVal>>> {
         let states = self.states.read();
-        return states
-            .get(id)
-            .map(|state| state.clone());
+        return states.get(id).map(|state| state.clone());
     }
     fn next_val_id(&self) -> usize {
         self.val_counter.fetch_add(1, Ordering::Relaxed)
@@ -132,18 +153,20 @@ impl TxnManagerInner {
 struct DataObject {
     changed: bool,
     new: bool,
-    data: Option<UnsafeValCell>
+    data: Option<UnsafeValCell>,
 }
 
 struct HistoryEntry {
     id: usize,
     version: usize,
     data: Option<UnsafeValCell>,
-    op: HistoryOp
+    op: HistoryOp,
 }
 
 enum HistoryOp {
-    Delete, Create, Update
+    Delete,
+    Create,
+    Update,
 }
 
 pub struct Txn {
@@ -152,7 +175,7 @@ pub struct Txn {
     state: TxnState,
     history: Vec<HistoryEntry>,
     defers: HashMap<usize, Box<Fn()>>,
-    id: usize
+    id: usize,
 }
 
 impl Txn {
@@ -163,7 +186,7 @@ impl Txn {
             state: TxnState::Started,
             history: Vec::new(),
             defers: HashMap::new(),
-            id
+            id,
         }
     }
 
@@ -181,15 +204,18 @@ impl Txn {
     //      W_b and R_b, B should read from its cache
     //      R_a and R_b, need to record id for B (the latest)
     pub fn read<T>(&mut self, val_ref: TxnValRef) -> Result<Option<Arc<T>>, TxnErr>
-        where T: 'static + Send + Sync + Clone
+    where
+        T: 'static + Send + Sync + Clone,
     {
         assert_eq!(self.state, TxnState::Started);
         let val_id = val_ref.id;
         // W_a and R_a
         if let Some(v) = self.values.get(&val_id) {
             return Ok(unsafe {
-                v.data.as_ref().map(|v| (&*v.get()).clone().downcast::<T>().expect(""))
-            })
+                v.data
+                    .as_ref()
+                    .map(|v| (&*v.get()).clone().downcast::<T>().expect(""))
+            });
         }
         if let Some(state_lock) = self.manager.get_state(&val_id) {
             let mut state = state_lock.lock();
@@ -198,8 +224,13 @@ impl Txn {
                 let val_last_write = &mut state.read;
                 if *val_last_write > self.id || state_owner != 0 {
                     // cannot read when the transactions happens after last write
-                    trace!("Not realizable on read {} due to read too late {}/{}", val_id, val_last_write, self.id);
-                    return Err(TxnErr::NotRealizable)
+                    trace!(
+                        "Not realizable on read {} due to read too late {}/{}",
+                        val_id,
+                        val_last_write,
+                        self.id
+                    );
+                    return Err(TxnErr::NotRealizable);
                 }
             }
             {
@@ -210,57 +241,72 @@ impl Txn {
                 }
             }
             let value: Arc<T> = unsafe { state.get() };
-            self.values.insert(val_id, DataObject {
-                changed: false,
-                new: false,
-                data: Some(UnsafeCell::new(value.clone()))
-            });
-            return Ok(Some(value))
+            self.values.insert(
+                val_id,
+                DataObject {
+                    changed: false,
+                    new: false,
+                    data: Some(UnsafeCell::new(value.clone())),
+                },
+            );
+            return Ok(Some(value));
         } else {
             return Ok(None);
         }
     }
 
     pub fn read_owned<T>(&mut self, val_ref: TxnValRef) -> Result<Option<T>, TxnErr>
-        where T: 'static + Send + Sync + Clone
+    where
+        T: 'static + Send + Sync + Clone,
     {
         self.read(val_ref)
-            .map(|opt: Option<Arc<T>>|
-                opt.map(|arc|
-                    (*arc).clone()))
+            .map(|opt: Option<Arc<T>>| opt.map(|arc| (*arc).clone()))
     }
 
     // Write to transaction cache for commit
-    pub fn update<T>(&mut self, val_ref: TxnValRef, value: T) where T: 'static + Send + Sync + Clone {
+    pub fn update<T>(&mut self, val_ref: TxnValRef, value: T)
+    where
+        T: 'static + Send + Sync + Clone,
+    {
         assert_eq!(self.state, TxnState::Started);
         let val_id = val_ref.id;
         if let Some(ref mut data_obj) = self.values.get_mut(&val_id) {
             if data_obj.data.is_none() {
                 data_obj.data = Some(unsafe_val_from(value));
             } else {
-                data_obj.data.as_ref().map(|data| {
-                    unsafe { *(&mut *data.get()) = Arc::new(value) }
-                });
+                data_obj
+                    .data
+                    .as_ref()
+                    .map(|data| unsafe { *(&mut *data.get()) = Arc::new(value) });
             }
             data_obj.changed = true;
             return;
         }
-        self.values.insert(val_id, DataObject {
-            data: Some(unsafe_val_from(value)),
-            changed: true,
-            new: false
-        });
+        self.values.insert(
+            val_id,
+            DataObject {
+                data: Some(unsafe_val_from(value)),
+                changed: true,
+                new: false,
+            },
+        );
     }
 
-    pub fn new_value<T>(&mut self, value: T) -> TxnValRef where T: 'static + Send + Sync + Clone {
+    pub fn new_value<T>(&mut self, value: T) -> TxnValRef
+    where
+        T: 'static + Send + Sync + Clone,
+    {
         assert_eq!(self.state, TxnState::Started);
         let val_id = self.manager.next_val_id();
-        self.values.insert(val_id, DataObject {
-            data: Some(unsafe_val_from(value)),
-            changed: true,
-            new: true
-        });
-        return TxnValRef { id: val_id }
+        self.values.insert(
+            val_id,
+            DataObject {
+                data: Some(unsafe_val_from(value)),
+                changed: true,
+                new: true,
+            },
+        );
+        return TxnValRef { id: val_id };
     }
 
     pub fn delete(&mut self, val_ref: TxnValRef) -> Option<()> {
@@ -280,11 +326,14 @@ impl Txn {
         trace!("read locking manager state on delete");
         if self.manager.states.read().get(&val_id).is_some() {
             // found the value but does not in the
-            self.values.insert(val_id, DataObject {
-                changed: true,
-                new: false,
-                data: None
-            });
+            self.values.insert(
+                val_id,
+                DataObject {
+                    changed: true,
+                    new: false,
+                    data: None,
+                },
+            );
             Some(())
         } else {
             None
@@ -303,7 +352,9 @@ impl Txn {
         let txn_id = self.id;
         trace!("obtaining locks {}", self.id);
         for (id, obj) in &self.values {
-            if !obj.changed { continue; } // skip readonly lock
+            if !obj.changed {
+                continue;
+            } // skip readonly lock
             if let Some(ref val) = self.manager.get_state(id) {
                 value_locks.push(val.clone());
             }
@@ -312,9 +363,13 @@ impl Txn {
         for lock in &value_locks {
             let guard = lock.lock();
             if guard.read > txn_id || guard.write > txn_id || guard.owner != 0 {
-                trace!("Not realizable on prepare due to r/w txn id and owner check: {}/{}, owner {}",
-                       guard.read, guard.write, guard.owner);
-                return Err(TxnErr::NotRealizable)
+                trace!(
+                    "Not realizable on prepare due to r/w txn id and owner check: {}/{}, owner {}",
+                    guard.read,
+                    guard.write,
+                    guard.owner
+                );
+                return Err(TxnErr::NotRealizable);
             }
             value_guards.insert(guard.id, guard);
         }
@@ -326,38 +381,48 @@ impl Txn {
             } // ignore read
             if obj.new {
                 trace!("Creating data {}", id);
-                trace!("locking manager state prepare create data {} txn: {}", id, txn_id);
+                trace!(
+                    "locking manager state prepare create data {} txn: {}",
+                    id,
+                    txn_id
+                );
                 let mut states = self.manager.states.write();
                 if states.contains_key(id) {
-                    trace!("Not realizable due to creating existed value for id: {}", id);
-                    return Err(TxnErr::NotRealizable)
+                    trace!(
+                        "Not realizable due to creating existed value for id: {}",
+                        id
+                    );
+                    return Err(TxnErr::NotRealizable);
                 }
                 if let Some(ref mut new_data) = &mut obj.data {
                     let new_val_owned = mem::replace(new_data, unsafe_val_from(()));
                     states.insert(
                         *id,
-                        Arc::new(
-                            Mutex::new(
-                                TxnVal {
-                                    id: *id,
-                                    data: new_val_owned,
-                                    read: txn_id,
-                                    write: txn_id,
-                                    version: 1,
-                                    owner: txn_id
-                                })));
+                        Arc::new(Mutex::new(TxnVal {
+                            id: *id,
+                            data: new_val_owned,
+                            read: txn_id,
+                            write: txn_id,
+                            version: 1,
+                            owner: txn_id,
+                        })),
+                    );
                     history.push(HistoryEntry {
                         id: *id,
                         data: None,
                         version: 1,
-                        op: HistoryOp::Create
+                        op: HistoryOp::Create,
                     });
-                    continue
-                } else { unreachable!() }
+                    continue;
+                } else {
+                    unreachable!()
+                }
             }
             // following part assumes value exists in txn manager but need to be changed
             if value_guards.contains_key(id) {
-                if let (Some(ref mut new_obj), Some(ref mut val)) = (&mut obj.data, value_guards.get_mut(id)) {
+                if let (Some(ref mut new_obj), Some(ref mut val)) =
+                    (&mut obj.data, value_guards.get_mut(id))
+                {
                     trace!("Updating data {}", id);
                     let new_val_owned = mem::replace(new_obj, unsafe_val_from(()));
                     let old_val_owned = mem::replace(&mut val.data, new_val_owned);
@@ -367,23 +432,28 @@ impl Txn {
                         id: *id,
                         data: Some(old_val_owned),
                         version: val.version,
-                        op: HistoryOp::Update
+                        op: HistoryOp::Update,
                     });
                     continue;
                 }
                 // Delete
                 {
-                    trace!("locking manager state prepare delete data {} txn: {}", id, txn_id);
+                    trace!(
+                        "locking manager state prepare delete data {} txn: {}",
+                        id,
+                        txn_id
+                    );
                     let mut states = self.manager.states.write();
                     if let Some(_) = states.remove(id) {
                         trace!("Deleting data {}", id);
                         let mut txn_val = value_guards.get_mut(id).unwrap();
-                        let removed_val_owned = mem::replace(&mut txn_val.data, unsafe_val_from(()));
+                        let removed_val_owned =
+                            mem::replace(&mut txn_val.data, unsafe_val_from(()));
                         history.push(HistoryEntry {
                             id: *id,
                             data: Some(removed_val_owned),
                             version: txn_val.version,
-                            op: HistoryOp::Delete
+                            op: HistoryOp::Delete,
                         });
                         continue;
                     }
@@ -393,12 +463,12 @@ impl Txn {
             return Err(TxnErr::NotRealizable);
         }
         self.state = TxnState::Prepared;
-        return Ok(())
+        return Ok(());
     }
 
     pub fn abort(&mut self) -> Result<(), TxnErr> {
         if self.state == TxnState::Aborted {
-            return Ok(())
+            return Ok(());
         }
         {
             let txn_id = self.id;
@@ -415,29 +485,36 @@ impl Txn {
                                 states.insert(id, removed);
                             }
                         }
-                    },
+                    }
                     HistoryOp::Delete => {
                         if !states.contains_key(&id) {
                             let owned_removed = if let Some(ref mut val) = history.data {
                                 mem::replace(val, unsafe_val_from(()))
-                            } else { unreachable!() };
-                            states.insert(id, Arc::new(Mutex::new(TxnVal {
+                            } else {
+                                unreachable!()
+                            };
+                            states.insert(
                                 id,
-                                read: txn_id,
-                                write: txn_id,
-                                version: history.version,
-                                data: owned_removed,
-                                owner: 0
-                            })));
+                                Arc::new(Mutex::new(TxnVal {
+                                    id,
+                                    read: txn_id,
+                                    write: txn_id,
+                                    version: history.version,
+                                    data: owned_removed,
+                                    owner: 0,
+                                })),
+                            );
                         }
-                    },
+                    }
                     HistoryOp::Update => {
                         if let Some(ref mut val) = states.get(&id) {
                             let mut val_guard = val.lock();
                             if val_guard.version == history.version {
                                 let owned_old = if let Some(ref mut val) = history.data {
                                     mem::replace(val, unsafe_val_from(()))
-                                } else { unreachable!() };
+                                } else {
+                                    unreachable!()
+                                };
                                 val_guard.version -= 1;
                                 val_guard.data = owned_old;
                             }
@@ -453,7 +530,10 @@ impl Txn {
 
     // run certain function when the transaction succeed
     // id is used to identify the function to prevent double spend
-    pub fn defer<F>(&mut self, id: usize, func: F) where F: Fn() + 'static {
+    pub fn defer<F>(&mut self, id: usize, func: F)
+    where
+        F: Fn() + 'static,
+    {
         self.defers.insert(id, Box::new(func));
     }
 
@@ -488,7 +568,7 @@ impl Txn {
 #[derive(Debug)]
 pub enum TxnErr {
     Aborted,
-    NotRealizable
+    NotRealizable,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -497,7 +577,7 @@ enum TxnState {
     Aborted,
     Prepared,
     Committed,
-    Ended
+    Ended,
 }
 
 #[cfg(test)]
@@ -510,10 +590,12 @@ mod test {
     fn single_op() {
         simple_logger::init();
         let manager = TxnManager::new();
-        let val = manager.transaction(|txn| {
-            // C
-            Ok(txn.new_value::<u32>(123))
-        }).unwrap();
+        let val = manager
+            .transaction(|txn| {
+                // C
+                Ok(txn.new_value::<u32>(123))
+            })
+            .unwrap();
         manager.transaction(|txn| {
             // R
             assert_eq!(txn.read_owned::<u32>(val)?.unwrap(), 123);
@@ -548,13 +630,15 @@ mod test {
         simple_logger::init();
         let manager = TxnManager::new();
         let v1 = manager.with_value::<u64>(123);
-        let v2 = manager.transaction(|txn| {
-            assert_eq!(txn.read_owned::<u64>(v1)?.unwrap(), 123);
-            txn.update::<u64>(v1, 321);
-            assert_eq!(txn.read_owned::<u64>(v1)?.unwrap(), 321);
-            let v1_val = txn.read_owned::<u64>(v1)?.unwrap();
-            Ok(txn.new_value(v1_val))
-        }).unwrap();
+        let v2 = manager
+            .transaction(|txn| {
+                assert_eq!(txn.read_owned::<u64>(v1)?.unwrap(), 123);
+                txn.update::<u64>(v1, 321);
+                assert_eq!(txn.read_owned::<u64>(v1)?.unwrap(), 321);
+                let v1_val = txn.read_owned::<u64>(v1)?.unwrap();
+                Ok(txn.new_value(v1_val))
+            })
+            .unwrap();
         manager.transaction(|txn| {
             assert_eq!(txn.read_owned::<u64>(v2)?.unwrap(), 321);
             Ok(())
@@ -583,8 +667,11 @@ mod test {
         for th in threads {
             th.join().unwrap();
         }
-        assert_eq!(manager.transaction(|txn| {
-            txn.read_owned::<i32>(v1).map(|opt| opt.unwrap())
-        }).unwrap(), thread_count);
+        assert_eq!(
+            manager
+                .transaction(|txn| txn.read_owned::<i32>(v1).map(|opt| opt.unwrap()))
+                .unwrap(),
+            thread_count
+        );
     }
 }
