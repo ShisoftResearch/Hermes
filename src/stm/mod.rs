@@ -4,7 +4,6 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::any::Any;
-use std::borrow::BorrowMut;
 use std::sync::atomic::Ordering;
 use std::mem;
 use parking_lot::RwLock;
@@ -35,11 +34,6 @@ impl TxnVal {
     unsafe fn get<T>(&self) -> Arc<T> where T: Any + Send + Sync + Clone {
         let data = &*self.data.get();
         data.clone().downcast::<T>().expect("wrong type for txn val")
-    }
-    unsafe fn set<T>(&self, val: T) -> Arc<T>  where T: Any + Send + Sync {
-        mem::replace(&mut *self.data.get(), Arc::new(val))
-            .downcast::<T>()
-            .expect("wrong type for replacing txn val")
     }
 }
 
@@ -99,19 +93,18 @@ impl TxnManager {
                         },
                         Err(TxnErr::Aborted) => {
                             trace!("Prepare aborted {}", txn_id);
-                            txn.abort();
-                            return Err(TxnErr::Aborted)
+                            return Err(txn.abort().err().unwrap());
                         },
                         Err(TxnErr::NotRealizable) => {
                             trace!("Prepare not realizable {}", txn_id);
-                            txn.abort();
+                            txn.abort().err().unwrap();
                             continue;
                         }
                     }
                 },
                 Err(TxnErr::Aborted) => return Err(TxnErr::Aborted),
                 Err(TxnErr::NotRealizable) => {
-                    txn.abort();
+                    txn.abort().err().unwrap();
                     continue;
                 }
             }
@@ -306,7 +299,7 @@ impl Txn {
         // obtain all existing value locks
         let mut value_locks = vec![];
         let mut value_guards = HashMap::new();
-        let mut history = &mut self.history;
+        let history = &mut self.history;
         let txn_id = self.id;
         trace!("obtaining locks {}", self.id);
         for (id, obj) in &self.values {
@@ -475,7 +468,7 @@ impl Txn {
         if self.state == TxnState::Aborted || self.state == TxnState::Prepared {
             trace!("locking manager state on end: {}", txn_id);
             let states = self.manager.states.read();
-            for (id, obj) in &self.values {
+            for (id, _) in &self.values {
                 if let Some(lock) = states.get(id) {
                     let mut val = lock.lock();
                     if val.owner == txn_id {
