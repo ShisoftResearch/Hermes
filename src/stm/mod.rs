@@ -81,7 +81,7 @@ impl TxnManager {
         states.insert(val_id, Arc::new(Mutex::new(val)));
         TxnValRef { id: val_id }
     }
-    pub fn transaction_optional_commit<R, B>(&self, block: B, auto_commit: bool)
+    fn transaction_optional_commit<R, B>(&self, block: B, auto_commit: bool)
         -> Result<(Txn, R), TxnErr> where B: Fn(&mut Txn) -> Result<R, TxnErr>
     {
         loop {
@@ -93,7 +93,7 @@ impl TxnManager {
                         Ok(_) => {
                             trace!("Prepared {}", txn_id);
                             if auto_commit {
-                                txn.end();
+                                txn.commit();
                             }
                             return Ok((txn, res));
                         },
@@ -158,6 +158,7 @@ pub struct Txn {
     values: HashMap<usize, DataObject>,
     state: TxnState,
     history: Vec<HistoryEntry>,
+    defers: HashMap<usize, Box<Fn()>>,
     id: usize
 }
 
@@ -168,6 +169,7 @@ impl Txn {
             values: HashMap::new(),
             state: TxnState::Started,
             history: Vec::new(),
+            defers: HashMap::new(),
             id
         }
     }
@@ -456,6 +458,16 @@ impl Txn {
         return Err(TxnErr::Aborted);
     }
 
+    // run certain function when the transaction succeed
+    // id is used to identify the function to prevent double spend
+    pub fn defer<F>(&mut self, id: usize, func: F) where F: Fn() + 'static {
+        self.defers.insert(id, Box::new(func));
+    }
+
+    pub fn commit(&mut self) {
+        self.defers.iter().for_each(|(_, func)| (func)());
+        self.end();
+    }
 
     // cleanup all locks and release resource to other threads
     fn end(&mut self) {
