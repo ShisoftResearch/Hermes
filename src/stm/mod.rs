@@ -174,7 +174,7 @@ pub struct Txn {
     values: HashMap<usize, DataObject>,
     state: TxnState,
     history: Vec<HistoryEntry>,
-    defers: HashMap<usize, Box<Fn()>>,
+    defers: Vec<Box<Fn()>>,
     id: usize,
 }
 
@@ -185,7 +185,7 @@ impl Txn {
             values: HashMap::new(),
             state: TxnState::Started,
             history: Vec::new(),
-            defers: HashMap::new(),
+            defers: Vec::new(),
             id,
         }
     }
@@ -530,15 +530,15 @@ impl Txn {
 
     // run certain function when the transaction succeed
     // id is used to identify the function to prevent double spend
-    pub fn defer<F>(&mut self, id: usize, func: F)
+    pub fn defer<F>(&mut self, func: F)
     where
         F: Fn() + 'static,
     {
-        self.defers.insert(id, Box::new(func));
+        self.defers.push(Box::new(func));
     }
 
     pub fn commit(&mut self) {
-        self.defers.iter().for_each(|(_, func)| (func)());
+        self.defers.iter().for_each(|func| (func)());
         self.end();
     }
 
