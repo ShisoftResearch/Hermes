@@ -93,7 +93,7 @@ impl TxnManager {
         states.insert(val_id, Arc::new(Mutex::new(val)));
         TxnValRef { id: val_id }
     }
-    fn transaction_optional_commit<R, B>(
+    pub fn transaction_optional_commit<R, B>(
         &self,
         block: B,
         auto_commit: bool,
@@ -102,8 +102,8 @@ impl TxnManager {
         B: Fn(&mut Txn) -> Result<R, TxnErr>,
     {
         loop {
-            let txn_id = self.inner.txn_counter.fetch_add(1, Ordering::Relaxed);
-            let mut txn = Txn::new(&self.inner, txn_id);
+            let mut txn = self.new_txn();
+            let txn_id = txn.id;
             match block(&mut txn) {
                 Ok(res) => match txn.prepare() {
                     Ok(_) => {
@@ -137,6 +137,10 @@ impl TxnManager {
     {
         self.transaction_optional_commit(block, true)
             .map(|(_, r)| r)
+    }
+    pub fn new_txn(&self) -> Txn {
+        let txn_id = self.inner.txn_counter.fetch_add(1, Ordering::Relaxed);
+        Txn::new(&self.inner, txn_id)
     }
 }
 
