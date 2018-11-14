@@ -58,7 +58,7 @@ impl Default for TxnValRef {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct TxnValRef {
     id: usize,
 }
@@ -67,6 +67,7 @@ struct TxnManagerInner {
     val_counter: AtomicUsize,
     txn_counter: AtomicUsize,
     states: RwLock<HashMap<usize, Arc<Mutex<TxnVal>>>>,
+    exclusives: RwLock<(HashMap<TxnValRef, usize>, HashMap<usize, Vec<TxnValRef>>)>
 }
 
 pub struct TxnManager {
@@ -80,6 +81,7 @@ impl TxnManager {
                 val_counter: AtomicUsize::new(1),
                 txn_counter: AtomicUsize::new(1),
                 states: RwLock::new(HashMap::new()),
+                exclusives: RwLock::new((HashMap::new(), HashMap::new()))
             }),
         }
     }
@@ -268,11 +270,12 @@ impl Txn {
     }
 
     // Write to transaction cache for commit
-    pub fn update<T>(&mut self, val_ref: TxnValRef, value: T)
+    pub fn update<T>(&mut self, val_ref: TxnValRef, value: T) -> Result<(), TxnErr>
     where
         T: 'static + Send + Sync + Clone,
     {
         assert_eq!(self.state, TxnState::Started);
+        if !self.check_accessible(val_ref) { return Err(TxnErr::NotRealizable) }
         let val_id = val_ref.id;
         if let Some(ref mut data_obj) = self.values.get_mut(&val_id) {
             if data_obj.data.is_none() {
@@ -284,7 +287,7 @@ impl Txn {
                     .map(|data| unsafe { *(&mut *data.get()) = Arc::new(value) });
             }
             data_obj.changed = true;
-            return;
+            return Ok(());
         }
         self.values.insert(
             val_id,
@@ -294,6 +297,7 @@ impl Txn {
                 new: false,
             },
         );
+        Ok(())
     }
 
     pub fn new_value<T>(&mut self, value: T) -> TxnValRef
@@ -313,7 +317,8 @@ impl Txn {
         return TxnValRef { id: val_id };
     }
 
-    pub fn delete(&mut self, val_ref: TxnValRef) -> Option<()> {
+    pub fn delete(&mut self, val_ref: TxnValRef) -> Result<Option<()>, TxnErr> {
+        if !self.check_accessible(val_ref) { return Err(TxnErr::NotRealizable) }
         let val_id = val_ref.id;
         if let Some(ref mut v) = self.values.get_mut(&val_id) {
             if v.data.is_some() {
@@ -321,10 +326,10 @@ impl Txn {
                 v.data = None;
                 v.changed = true;
                 v.new = false;
-                return Some(());
+                return Ok(Some(()));
             } else {
                 // already deleted
-                return None;
+                return Ok(None);
             }
         }
         trace!("read locking manager state on delete");
@@ -338,9 +343,9 @@ impl Txn {
                     data: None,
                 },
             );
-            Some(())
+            Ok(Some(()))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -546,6 +551,25 @@ impl Txn {
         self.end();
     }
 
+    pub fn exclusive(&mut self, val_ref: TxnValRef) {
+        let mut lock = self.manager.exclusives.write();
+        {
+            let ref_excluded = lock.0.get(&val_ref);
+            if ref_excluded.is_some() && ref_excluded != Some(&self.id) {
+                panic!("Value ref have been marked exclusive by another transaction");
+            }
+        }
+        lock.0.insert(val_ref, self.id);
+        lock.1.entry(self.id).or_insert_with(|| Vec::new()).push(val_ref);
+    }
+
+    // check reference can be accessed by this transaction
+    pub fn check_accessible(&self, val_ref: TxnValRef) -> bool {
+        let map = self.manager.exclusives.read();
+        let exc_txn = map.0.get(&val_ref);
+        return exc_txn.is_none() || exc_txn == Some(&self.id);
+    }
+
     // cleanup all locks and release resource to other threads
     fn end(&mut self) {
         let txn_id = self.id;
@@ -557,6 +581,15 @@ impl Txn {
                     let mut val = lock.lock();
                     if val.owner == txn_id {
                         val.owner = 0;
+                    }
+                }
+            }
+            {
+                let mut exclusive_lock = self.manager.exclusives.write();
+                if let Some(refs) = exclusive_lock.1.remove(&self.id) {
+                    for r in refs {
+                        let removed_lock = exclusive_lock.0.remove(&r);
+                        debug_assert_eq!(removed_lock, Some(self.id))
                     }
                 }
             }
@@ -637,7 +670,7 @@ mod test {
         let v2 = manager
             .transaction(|txn| {
                 assert_eq!(txn.read_owned::<u64>(v1)?.unwrap(), 123);
-                txn.update::<u64>(v1, 321);
+                txn.update::<u64>(v1, 321)?;
                 assert_eq!(txn.read_owned::<u64>(v1)?.unwrap(), 321);
                 let v1_val = txn.read_owned::<u64>(v1)?.unwrap();
                 Ok(txn.new_value(v1_val))
@@ -662,7 +695,7 @@ mod test {
                 manager.transaction(|txn| {
                     let mut v = txn.read_owned::<i32>(v1)?.unwrap();
                     v += 1;
-                    txn.update(v1, v);
+                    txn.update(v1, v)?;
                     Ok(())
                 });
             });
