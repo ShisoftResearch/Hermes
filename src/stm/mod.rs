@@ -384,7 +384,7 @@ impl Txn {
         for lock in &value_locks {
             let guard = lock.lock();
             if !self.check_accessible(guard.id) {
-                return self.abort();
+                return Err(TxnErr::NotRealizable);
             }
             if guard.read > txn_id || guard.write > txn_id || guard.owner != 0 {
                 trace!(
