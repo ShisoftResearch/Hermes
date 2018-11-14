@@ -369,13 +369,13 @@ impl Txn {
         // obtain all existing value locks
         let mut value_locks = vec![];
         let mut value_guards = HashMap::new();
-        let history = &mut self.history;
         let txn_id = self.id;
         trace!("obtaining locks {}", self.id);
         for (val_ref, obj) in &self.values {
             if !obj.changed {
                 continue;
             } // skip readonly lock
+            // check exclusive
             if let Some(ref val) = self.manager.get_state(val_ref) {
                 value_locks.push(val.clone());
             }
@@ -383,6 +383,9 @@ impl Txn {
         trace!("obtaining guards {}", self.id);
         for lock in &value_locks {
             let guard = lock.lock();
+            if !self.check_accessible(guard.id) {
+                return self.abort();
+            }
             if guard.read > txn_id || guard.write > txn_id || guard.owner != 0 {
                 trace!(
                     "Not realizable on prepare due to r/w txn id and owner check: {}/{}, owner {}",
@@ -394,6 +397,8 @@ impl Txn {
             }
             value_guards.insert(guard.id, guard);
         }
+
+        let history = &mut self.history;
         trace!("checking and updating data {}", self.id);
         for (val_ref, obj) in &mut self.values {
             if !obj.changed {
