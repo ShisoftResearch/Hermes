@@ -53,6 +53,12 @@ impl TxnVal {
             .downcast::<T>()
             .expect("wrong type for txn val")
     }
+
+    unsafe fn set<T>(&self, val: T) -> Arc<T>  where T: Any + Send + Sync {
+        mem::replace(&mut *self.data.get(), Arc::new(val))
+            .downcast::<T>()
+            .expect("wrong type for replacing txn val")
+    }
 }
 
 impl Default for TxnValRef {
@@ -310,6 +316,28 @@ impl Txn {
             },
         );
         Ok(())
+    }
+
+    // update the value regards with the transactions without checking,
+    // other transactions with this value in their history will be retried
+    // this will bypass every kind of checks so it is not supposed to be used lightly
+    // this operation cannot be aborted
+    pub unsafe fn force_update<T>(&mut self, val_ref: TxnValRef, value: T) where
+        T: 'static + Send + Sync + Clone,
+    {
+        self.values.insert(val_ref, DataObject {
+            data: Some(unsafe_val_from(value.clone())),
+            changed: true,
+            new: false
+        });
+        let state = self.manager.get_state(&val_ref).unwrap();
+        let mut state_guard = state.lock();
+        state_guard.read = self.id;
+        state_guard.write = self.id;
+        state_guard.owner = self.id;
+        unsafe {
+            state_guard.set(value);
+        }
     }
 
     pub fn new_value<T>(&mut self, value: T) -> TxnValRef
