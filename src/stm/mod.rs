@@ -335,6 +335,7 @@ impl Txn {
                 unsafe {
                     state_guard.set(value.clone());
                 }
+                break;
             }
         }
         self.values.insert(val_ref, DataObject {
