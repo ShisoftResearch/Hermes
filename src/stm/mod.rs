@@ -325,19 +325,23 @@ impl Txn {
     pub unsafe fn force_update<T>(&mut self, val_ref: TxnValRef, value: T) where
         T: 'static + Send + Sync + Clone,
     {
+        let state = self.manager.get_state(&val_ref).unwrap();
+        loop {
+            let mut state_guard = state.lock();
+            if state_guard.owner == 0 || state_guard.owner == self.id {
+                state_guard.read = self.id;
+                state_guard.write = self.id;
+                state_guard.owner = self.id;
+                unsafe {
+                    state_guard.set(value.clone());
+                }
+            }
+        }
         self.values.insert(val_ref, DataObject {
-            data: Some(unsafe_val_from(value.clone())),
+            data: Some(unsafe_val_from(value)),
             changed: true,
             new: false
         });
-        let state = self.manager.get_state(&val_ref).unwrap();
-        let mut state_guard = state.lock();
-        state_guard.read = self.id;
-        state_guard.write = self.id;
-        state_guard.owner = self.id;
-        unsafe {
-            state_guard.set(value);
-        }
     }
 
     pub fn new_value<T>(&mut self, value: T) -> TxnValRef
