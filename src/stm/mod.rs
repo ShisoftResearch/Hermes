@@ -11,7 +11,7 @@ use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
 
-type UnsafeValCell = UnsafeCell<Arc<Any + Send + Sync>>;
+type UnsafeValCell = UnsafeCell<Arc<dyn Any + Send + Sync>>;
 
 struct TxnVal {
     id: TxnValRef,
@@ -200,7 +200,7 @@ pub struct Txn {
     values: HashMap<TxnValRef, DataObject>,
     state: TxnState,
     history: Vec<HistoryEntry>,
-    defers: Vec<Box<Fn()>>,
+    defers: Vec<Box<dyn Fn()>>,
     id: usize,
 }
 
@@ -332,9 +332,7 @@ impl Txn {
                 state_guard.read = self.id;
                 state_guard.write = self.id;
                 state_guard.owner = self.id;
-                unsafe {
-                    state_guard.set(value.clone());
-                }
+                state_guard.set(value.clone());
                 break;
             }
         }
@@ -506,7 +504,7 @@ impl Txn {
                     let mut states = self.manager.states.write();
                     if let Some(_) = states.remove(val_ref) {
                         trace!("Deleting data {}", val_ref);
-                        let mut txn_val = value_guards.get_mut(val_ref).unwrap();
+                        let txn_val = value_guards.get_mut(val_ref).unwrap();
                         let removed_val_owned =
                             mem::replace(&mut txn_val.data, unsafe_val_from(()));
                         history.push(HistoryEntry {
