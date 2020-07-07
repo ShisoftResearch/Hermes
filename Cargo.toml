@@ -12,4 +12,4 @@ parking_lot = "*"
 log = "*"
 
 [dev-dependencies]
-simple_logger = "0.5"
+simple_logger = "1"
